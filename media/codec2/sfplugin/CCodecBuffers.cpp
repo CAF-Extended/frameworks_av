@@ -21,6 +21,7 @@
 #include <C2PlatformSupport.h>
 
 #include <media/stagefright/foundation/ADebug.h>
+#include <media/stagefright/foundation/MediaDefs.h>
 #include <media/stagefright/MediaCodec.h>
 #include <media/stagefright/MediaCodecConstants.h>
 #include <media/stagefright/SkipCutBuffer.h>
@@ -198,6 +199,56 @@ void OutputBuffers::setSkipCutBuffer(int32_t skip, int32_t cut) {
         }
     }
     mSkipCutBuffer = new SkipCutBuffer(skip, cut, mChannelCount);
+}
+
+bool OutputBuffers::convert(
+        const std::shared_ptr<C2Buffer> &src, sp<Codec2Buffer> *dst) {
+    if (!src || src->data().type() != C2BufferData::LINEAR) {
+        return false;
+    }
+    int32_t configEncoding = kAudioEncodingPcm16bit;
+    int32_t codecEncoding = kAudioEncodingPcm16bit;
+    if (mFormat->findInt32("android._codec-pcm-encoding", &codecEncoding)
+            && mFormat->findInt32("android._config-pcm-encoding", &configEncoding)) {
+        if (mSrcEncoding != codecEncoding || mDstEncoding != configEncoding) {
+            if (codecEncoding != configEncoding) {
+                mDataConverter = AudioConverter::Create(
+                        (AudioEncoding)codecEncoding, (AudioEncoding)configEncoding);
+                ALOGD_IF(mDataConverter, "[%s] Converter created from %d to %d",
+                         mName, codecEncoding, configEncoding);
+                mFormatWithConverter = mFormat->dup();
+                mFormatWithConverter->setInt32(KEY_PCM_ENCODING, configEncoding);
+            } else {
+                mDataConverter = nullptr;
+                mFormatWithConverter = nullptr;
+            }
+            mSrcEncoding = codecEncoding;
+            mDstEncoding = configEncoding;
+        }
+        if (int encoding; !mFormat->findInt32(KEY_PCM_ENCODING, &encoding)
+                || encoding != mDstEncoding) {
+        }
+    }
+    if (!mDataConverter) {
+        return false;
+    }
+    sp<MediaCodecBuffer> srcBuffer = ConstLinearBlockBuffer::Allocate(mFormat, src);
+    if (!srcBuffer) {
+        return false;
+    }
+    if (!*dst) {
+        *dst = new Codec2Buffer(
+                mFormat,
+                new ABuffer(mDataConverter->targetSize(srcBuffer->size())));
+    }
+    sp<MediaCodecBuffer> dstBuffer = *dst;
+    status_t err = mDataConverter->convert(srcBuffer, dstBuffer);
+    if (err != OK) {
+        ALOGD("[%s] buffer conversion failed: %d", mName, err);
+        return false;
+    }
+    dstBuffer->setFormat(mFormatWithConverter);
+    return true;
 }
 
 void OutputBuffers::clearStash() {
@@ -503,6 +554,14 @@ size_t FlexBuffersImpl::numComponentBuffers() const {
             });
 }
 
+size_t FlexBuffersImpl::numClientBuffers() const {
+    return std::count_if(
+            mBuffers.begin(), mBuffers.end(),
+            [](const Entry &entry) {
+                return entry.clientBuffer != nullptr;
+            });
+}
+
 // BuffersArrayImpl
 
 void BuffersArrayImpl::initialize(
@@ -649,6 +708,14 @@ size_t BuffersArrayImpl::arraySize() const {
     return mBuffers.size();
 }
 
+size_t BuffersArrayImpl::numClientBuffers() const {
+    return std::count_if(
+            mBuffers.begin(), mBuffers.end(),
+            [](const Entry &entry) {
+                return entry.ownedByClient;
+            });
+}
+
 // InputBuffersArray
 
 void InputBuffersArray::initialize(
@@ -695,6 +762,10 @@ size_t InputBuffersArray::numActiveSlots() const {
     return mImpl.numActiveSlots();
 }
 
+size_t InputBuffersArray::numClientBuffers() const {
+    return mImpl.numClientBuffers();
+}
+
 sp<Codec2Buffer> InputBuffersArray::createNewBuffer() {
     return mAllocate();
 }
@@ -731,6 +802,10 @@ std::unique_ptr<InputBuffers> SlotInputBuffers::toArrayMode(size_t) {
 
 size_t SlotInputBuffers::numActiveSlots() const {
     return mImpl.numActiveSlots();
+}
+
+size_t SlotInputBuffers::numClientBuffers() const {
+    return mImpl.numClientBuffers();
 }
 
 sp<Codec2Buffer> SlotInputBuffers::createNewBuffer() {
@@ -783,6 +858,10 @@ std::unique_ptr<InputBuffers> LinearInputBuffers::toArrayMode(size_t size) {
 
 size_t LinearInputBuffers::numActiveSlots() const {
     return mImpl.numActiveSlots();
+}
+
+size_t LinearInputBuffers::numClientBuffers() const {
+    return mImpl.numClientBuffers();
 }
 
 // static
@@ -963,6 +1042,10 @@ size_t GraphicMetadataInputBuffers::numActiveSlots() const {
     return mImpl.numActiveSlots();
 }
 
+size_t GraphicMetadataInputBuffers::numClientBuffers() const {
+    return mImpl.numClientBuffers();
+}
+
 sp<Codec2Buffer> GraphicMetadataInputBuffers::createNewBuffer() {
     std::shared_ptr<C2Allocator> alloc;
     c2_status_t err = mStore->fetchAllocator(mPool->getAllocatorId(), &alloc);
@@ -1042,6 +1125,10 @@ size_t GraphicInputBuffers::numActiveSlots() const {
     return mImpl.numActiveSlots();
 }
 
+size_t GraphicInputBuffers::numClientBuffers() const {
+    return mImpl.numClientBuffers();
+}
+
 sp<Codec2Buffer> GraphicInputBuffers::createNewBuffer() {
     int64_t usageValue = 0;
     (void)mFormat->findInt64("android._C2MemoryUsage", &usageValue);
@@ -1079,7 +1166,7 @@ status_t OutputBuffersArray::registerBuffer(
         return err;
     }
     c2Buffer->setFormat(mFormat);
-    if (!c2Buffer->copy(buffer)) {
+    if (!convert(buffer, &c2Buffer) && !c2Buffer->copy(buffer)) {
         ALOGD("[%s] copy buffer failed", mName);
         return WOULD_BLOCK;
     }
@@ -1195,9 +1282,12 @@ status_t FlexOutputBuffers::registerBuffer(
         const std::shared_ptr<C2Buffer> &buffer,
         size_t *index,
         sp<MediaCodecBuffer> *clientBuffer) {
-    sp<Codec2Buffer> newBuffer = wrap(buffer);
-    if (newBuffer == nullptr) {
-        return NO_MEMORY;
+    sp<Codec2Buffer> newBuffer;
+    if (!convert(buffer, &newBuffer)) {
+        newBuffer = wrap(buffer);
+        if (newBuffer == nullptr) {
+            return NO_MEMORY;
+        }
     }
     newBuffer->setFormat(mFormat);
     *index = mImpl.assignSlot(newBuffer);

@@ -1505,21 +1505,19 @@ audio_io_handle_t AudioPolicyManager::getOutputForDevices(
     // mixed output. To some extent, it can help save some power.
     const bool trackDirectPCM =
             property_get_bool("vendor.audio.offload.track.enable", true /* default_value */);
-    if (trackDirectPCM) {
-        const bool offloadDisable =
-                property_get_bool("audio.offload.disable", false /* default_value */);
-        if (!offloadDisable && stream == AUDIO_STREAM_MUSIC) {
-           if ((*flags == AUDIO_OUTPUT_FLAG_NONE) &&
-                (config->offload_info.usage == AUDIO_USAGE_MEDIA ||
-                 config->offload_info.usage == AUDIO_USAGE_GAME)) {
-                ALOGV("Force direct flags to use pcm offload, original flags(0x%x)", *flags);
-                *flags = AUDIO_OUTPUT_FLAG_DIRECT;
-            }
-        } else if (audio_is_linear_pcm(config->format) &&
-                *flags == AUDIO_OUTPUT_FLAG_DIRECT) {
-            ALOGV("%s Remove direct flags stream %d,orginal flags %0x", __func__, stream, *flags);
-            *flags = AUDIO_OUTPUT_FLAG_NONE;
+    const bool offloadDisable =
+            property_get_bool("audio.offload.disable", false /* default_value */);
+    if (trackDirectPCM && !offloadDisable && stream == AUDIO_STREAM_MUSIC) {
+       if ((*flags == AUDIO_OUTPUT_FLAG_NONE) &&
+            (config->offload_info.usage == AUDIO_USAGE_MEDIA ||
+             config->offload_info.usage == AUDIO_USAGE_GAME)) {
+            ALOGV("Force direct flags to use pcm offload, original flags(0x%x)", *flags);
+            *flags = AUDIO_OUTPUT_FLAG_DIRECT;
         }
+    } else if (audio_is_linear_pcm(config->format) &&
+            *flags == AUDIO_OUTPUT_FLAG_DIRECT) {
+        ALOGV("%s Remove direct flags stream %d,orginal flags %0x", __func__, stream, *flags);
+        *flags = AUDIO_OUTPUT_FLAG_NONE;
     }
 
     bool forceDeepBuffer = false;
@@ -1534,9 +1532,10 @@ audio_io_handle_t AudioPolicyManager::getOutputForDevices(
     }
     if (stream == AUDIO_STREAM_TTS) {
         *flags = AUDIO_OUTPUT_FLAG_TTS;
-    } else if (stream == AUDIO_STREAM_VOICE_CALL &&
+    } else if ((stream == AUDIO_STREAM_VOICE_CALL &&
                audio_is_linear_pcm(config->format) &&
-               (*flags & AUDIO_OUTPUT_FLAG_INCALL_MUSIC) == 0) {
+               (*flags & AUDIO_OUTPUT_FLAG_INCALL_MUSIC) == 0) &&
+               (mEngine->getPhoneState() != AUDIO_MODE_IN_CALL)) {
         *flags = (audio_output_flags_t)(AUDIO_OUTPUT_FLAG_VOIP_RX |
                                        AUDIO_OUTPUT_FLAG_DIRECT);
         ALOGV("Set VoIP and Direct output flags for PCM format");

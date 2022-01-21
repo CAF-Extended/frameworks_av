@@ -18,9 +18,11 @@
 
 #define CCODEC_BUFFERS_H_
 
+#include <optional>
 #include <string>
 
 #include <C2Config.h>
+#include <DataConverter.h>
 #include <media/stagefright/foundation/AMessage.h>
 #include <media/MediaCodecBuffer.h>
 
@@ -148,6 +150,11 @@ public:
      *          possible.
      */
     sp<Codec2Buffer> cloneAndReleaseBuffer(const sp<MediaCodecBuffer> &buffer);
+
+    /**
+     * Return number of buffers are given to client but have not yet queued back.
+     */
+    virtual size_t numClientBuffers() const = 0;
 
 protected:
     virtual sp<Codec2Buffer> createNewBuffer() = 0;
@@ -382,6 +389,14 @@ protected:
      */
     void submit(const sp<MediaCodecBuffer> &buffer);
 
+    /**
+     * Apply DataConverter from |src| to |*dst| if needed. If |*dst| is nullptr,
+     * a new buffer is allocated.
+     *
+     * Returns true if conversion was needed and executed; false otherwise.
+     */
+    bool convert(const std::shared_ptr<C2Buffer> &src, sp<Codec2Buffer> *dst);
+
 private:
     // SkipCutBuffer
     int32_t mDelay;
@@ -390,6 +405,12 @@ private:
     int32_t mChannelCount;
 
     void setSkipCutBuffer(int32_t skip, int32_t cut);
+
+    // DataConverter
+    sp<DataConverter> mDataConverter;
+    sp<AMessage> mFormatWithConverter;
+    std::optional<int32_t> mSrcEncoding;
+    std::optional<int32_t> mDstEncoding;
 
     // Output stash
 
@@ -585,6 +606,11 @@ public:
     size_t numActiveSlots() const;
 
     /**
+     * Return number of buffers are given to client but have not yet queued back.
+     */
+    size_t numClientBuffers() const;
+
+    /**
      * Return the number of buffers that are sent to the component but not
      * returned back yet.
      */
@@ -710,6 +736,11 @@ public:
      */
     size_t arraySize() const;
 
+    /**
+     * Return number of buffers are given to client but have not yet queued back.
+     */
+    size_t numClientBuffers() const;
+
 private:
     std::string mImplName; ///< name for debugging
     const char *mName; ///< C-string version of name
@@ -765,6 +796,8 @@ public:
 
     size_t numActiveSlots() const final;
 
+    size_t numClientBuffers() const final;
+
 protected:
     sp<Codec2Buffer> createNewBuffer() override;
 
@@ -796,6 +829,8 @@ public:
 
     size_t numActiveSlots() const final;
 
+    size_t numClientBuffers() const final;
+
 protected:
     sp<Codec2Buffer> createNewBuffer() final;
 
@@ -825,6 +860,8 @@ public:
     std::unique_ptr<InputBuffers> toArrayMode(size_t size) override;
 
     size_t numActiveSlots() const final;
+
+    size_t numClientBuffers() const final;
 
 protected:
     sp<Codec2Buffer> createNewBuffer() override;
@@ -894,6 +931,8 @@ public:
 
     size_t numActiveSlots() const final;
 
+    size_t numClientBuffers() const final;
+
 protected:
     sp<Codec2Buffer> createNewBuffer() override;
 
@@ -923,6 +962,8 @@ public:
             size_t size) final;
 
     size_t numActiveSlots() const final;
+
+    size_t numClientBuffers() const final;
 
 protected:
     sp<Codec2Buffer> createNewBuffer() override;
@@ -964,6 +1005,10 @@ public:
     }
 
     size_t numActiveSlots() const final {
+        return 0u;
+    }
+
+    size_t numClientBuffers() const final {
         return 0u;
     }
 
